@@ -234,6 +234,32 @@ This project is **autoresearch for GPU kernels** -- directly inspired by Andrej 
 
 Built by the team behind [Forge](https://www.rightnowai.co/forge).
 
+For enterprise-grade GPU optimization with dedicated support, check out [Forge](https://www.rightnowai.co/forge) -- not built by the AutoKernel team, but a production-ready platform for GPU kernel optimization at scale.
+
+## Changelog
+
+### v1.3.0
+- AMD ROCm GPU support: MI300X, MI325X, MI350X, MI355X detection and specs (thanks [@andyluo7](https://github.com/andyluo7))
+- Fixed `verify.py` SyntaxError on Python 3.13+
+- Fixed CUDA flash_attention ignoring `sm_scale` parameter
+- Fixed CUDA cross_entropy returning wrong dtype
+- Fixed Triton rotary_embedding broadcasting truncation
+- Fixed Triton reduce output shape for non-last-dim reductions
+
+### v1.2.0
+- Enhanced profiler: `--export-trace`, `--memory-snapshot`, `--torch-compile-log` flags
+- HuggingFace Kernels export via `export_hf.py`
+
+### v1.1.0
+- Native CUDA C++ backend with 9 starter kernels (tensor cores, warp intrinsics, shared memory tiling)
+- KernelBench integration (250+ standardized GPU kernel problems)
+- `--backend triton|cuda` flag for `extract.py`
+
+### v1.0.0
+- Initial release: Triton kernel optimization pipeline with 5-stage correctness harness
+
+See [CHANGELOG.md](CHANGELOG.md) for full details.
+
 ## License
 
 MIT
