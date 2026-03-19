@@ -384,18 +384,18 @@ def generate_torch_binding_cpp(
 
     ops_str = "\n".join(ops_lines)
 
-    return textwrap.dedent(f"""\
-        #include <torch/library.h>
-
-        #include "registration.h"
-        #include "torch_binding.h"
-
-        TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {{
-        {ops_str}
-        }}
-
-        REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
-    """)
+    return (
+        "#include <torch/library.h>\n"
+        "\n"
+        '#include "registration.h"\n'
+        '#include "torch_binding.h"\n'
+        "\n"
+        "TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {\n"
+        f"{ops_str}\n"
+        "}\n"
+        "\n"
+        "REGISTER_EXTENSION(TORCH_EXTENSION_NAME)\n"
+    )
 
 
 def generate_torch_binding_h(
