@@ -2,10 +2,7 @@
 AutoKernel -- The file the agent modifies.
 
 Current kernel: Matrix Multiplication
-Target metric: throughput_tflops (higher is better)
-Secondary: correctness must ALWAYS pass
-
-Exp-M1: Increase tile size to 128x128, add autotune, add L2 swizzle.
+Exp-M2: Remove inner-loop K masking, use modular M/N offsets, add waves_per_eu.
 """
 
 KERNEL_TYPE = "matmul"
@@ -21,7 +18,6 @@ import triton.language as tl
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_warps=4, num_stages=2),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_warps=8, num_stages=2),
         triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_warps=4, num_stages=2),
     ],
     key=['M', 'N', 'K'],
 )
@@ -48,31 +44,32 @@ def matmul_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
-    a_ptrs = A_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
-    b_ptrs = B_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
+    a_ptrs = A_ptr + offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak
+    b_ptrs = B_ptr + offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        k_off = k * BLOCK_SIZE_K
-        a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & ((offs_k[None, :] + k_off) < K), other=0.0)
-        b = tl.load(b_ptrs, mask=((offs_k[:, None] + k_off) < K) & (offs_n[None, :] < N), other=0.0)
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         acc += tl.dot(a, b)
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = C_ptr + offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn
+    mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     c = acc.to(C_ptr.dtype.element_ty)
-    c_ptrs = C_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
-    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
     tl.store(c_ptrs, c, mask=mask)
 
 
 def kernel_fn(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
-    """Entry point called by bench.py. Must match reference.matmul_ref signature."""
+    """Entry point called by bench.py."""
     assert A.is_cuda and B.is_cuda
     M, K = A.shape
     K2, N = B.shape

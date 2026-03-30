@@ -10,8 +10,8 @@
 
 | Exp | Kernel | 假设 | 状态 | 关键结果 | 结论 |
 |-----|--------|------|------|----------|------|
-| M1 | matmul | 增大 tile 128×128 + autotune | 🔄 running | — | — |
-| M2 | matmul | 增加 num_warps=8 + swizzle | pending | — | — |
+| M1 | matmul | 增大 tile 128×128 + autotune + L2 swizzle | ✅ done | 73.4 TFLOPS, 0.447x | 无显著提升，autotune 在 2048×2048 上未改变 perf |
+| M2 | matmul | 去除 inner-loop masking + K-aligned tiling + waves_per_eu | 🔄 running | — | — |
 | M3 | matmul | Split-K for deep_k shapes | pending | — | — |
 
 ---
@@ -39,6 +39,48 @@ MI300X 有 304 CUs 和 64KB LDS/CU。增大 tile 到 128×128×32 可以：
 ### 预期
 - 假设成立: TFLOPS > 100, speedup > 0.60x, correctness PASS (fp16/bf16)
 - 假设不成立: TFLOPS ≈ 72 或 correctness FAIL（LDS overflow 或 register spill）
+
+### 结果
+
+| 指标 | Baseline | Exp-M1 | Delta |
+|------|----------|--------|-------|
+| TFLOPS | 72.80 | 73.42 | +0.8% |
+| vs PyTorch | 0.443x | 0.447x | +0.004 |
+| % peak | 5.6% | 5.6% | 0 |
+| fp16/bf16 correctness | PASS | PASS | — |
+| fp32 fails | 5/30 | 5/30 | same |
+
+### 分析
+- 假设不成立：tile size 128→128 + autotune 未产生显著提升
+- autotune 在 5 个 config 中搜索，但 2048×2048 不够大不能区分
+- 核心问题：5.6% peak 说明 MFMA 利用率极低，问题不在 tile size
+- 可能原因：inner loop 的 boundary masking 导致 Triton HIP 后端生成低效代码
+- fp32 failures 是 reduced-precision 累积误差，与优化无关
+
+### 结论与 Next Step
+REVERT（性能持平）。下一步 Exp-M2：去除 inner-loop masking（假设 K 对齐 BLOCK_SIZE_K），
+并尝试 `waves_per_eu` 占位，看是否能让编译器生成更好的 MFMA 指令序列。
+
+---
+
+## Exp-M2: matmul 去除 inner-loop masking + waves_per_eu
+
+### Phase 0 确认
+- 同 M1 ✅
+
+### 假设
+Inner-loop 的 per-element masking (`offs_k < K`) 在每次迭代中重新计算，可能阻止 Triton HIP
+编译器生成高效的 MFMA 指令。去除 K 维度的 mask（仅在最后一次迭代 mask），配合
+`waves_per_eu=2` 提示编译器用更多 registers，预期显著提升 MFMA 利用率。
+
+### 实验方案
+- 变量: 去除 inner-loop K masking, 只保留 M/N boundary masking
+- 添加 waves_per_eu=2 到 triton.Config
+- 关键: K-loop 使用 `range(0, K, BLOCK_SIZE_K)` 而非 `tl.cdiv`
+
+### 预期
+- 假设成立: TFLOPS > 100, % peak > 8%, correctness PASS
+- 假设不成立: TFLOPS ≈ 73 或 correctness FAIL
 
 ### 结果
 （待实验）
