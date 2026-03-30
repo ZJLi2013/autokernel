@@ -11,7 +11,7 @@
 | Exp | Kernel | 假设 | 状态 | 关键结果 | 结论 |
 |-----|--------|------|------|----------|------|
 | M1 | matmul | 增大 tile 128×128 + autotune + L2 swizzle | ✅ done | 73.4 TFLOPS, 0.447x | 无显著提升，autotune 在 2048×2048 上未改变 perf |
-| M2 | matmul | 去除 inner-loop masking + K-aligned tiling + waves_per_eu | 🔄 running | — | — |
+| M2 | matmul | 去除 inner-loop M/N masking via modular offsets | ✅ done | 73.9 TFLOPS, 0.451x | 同 M1，masking 不是瓶颈 |
 | M3 | matmul | Split-K for deep_k shapes | pending | — | — |
 
 ---
@@ -80,6 +80,47 @@ Inner-loop 的 per-element masking (`offs_k < K`) 在每次迭代中重新计算
 
 ### 预期
 - 假设成立: TFLOPS > 100, % peak > 8%, correctness PASS
+- 假设不成立: TFLOPS ≈ 73 或 correctness FAIL
+
+### 结果
+
+| 指标 | Baseline | M1 | M2 | Delta (M2 vs Base) |
+|------|----------|----|----|-----|
+| TFLOPS | 72.80 | 73.42 | 73.89 | +1.5% |
+| vs PyTorch | 0.443x | 0.447x | 0.451x | +0.008 |
+| % peak | 5.6% | 5.6% | 5.7% | +0.1% |
+
+### 分析
+- 假设不成立：去除 M/N masking 几乎无效
+- 根本原因分析：2048×2048 产生 256 tiles (128×128)，MI300X 有 304 CUs，**不足 1 tile/CU**
+- rocBLAS 也只 12.5% peak (164 TFLOPS)，说明这个 problem size 本身无法饱和 MI300X
+- Triton HIP 后端的编译质量可能是次要因素
+
+### 结论与 Next Step
+REVERT。tile size 和 masking 优化在 2048×2048 上无效。
+
+**核心洞察**：MI300X 304 CUs 在 2048³ matmul 上天然 under-utilized。需要：
+1. Exp-M3: num_stages=0 (HIP 无 cp.async, 多 stage 可能反而有害) + 更小 tile
+2. 或在 xlarge (4096×4096) 上验证——更大 problem size 应该更接近 peak
+
+---
+
+## Exp-M3: matmul num_stages=0 + 小 tile 64×64 提高并行度
+
+### Phase 0 确认
+- 同 M1 ✅
+
+### 假设
+HIP 后端没有 `cp.async`，`num_stages=2` 可能生成不必要的 buffer 管理代码。
+同时在 2048² 上用 64×64 tile 产生 1024 tiles >> 304 CUs，充分利用并行度。
+配合 `num_stages=0`（禁用 software pipelining），减少编译器开销。
+
+### 实验方案
+- 变量: num_stages=0, tile 64×64×32, num_warps=4, GROUP_SIZE_M=8
+- 对照: 同 tile 大小的 baseline (num_stages 未指定)
+
+### 预期
+- 假设成立: TFLOPS > 80, speedup > 0.50x
 - 假设不成立: TFLOPS ≈ 73 或 correctness FAIL
 
 ### 结果
